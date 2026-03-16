@@ -1,0 +1,252 @@
+import sqlite3
+import time
+import random
+import string
+
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+
+TOKEN = "8604446312:AAG3hZcQlLAkU6uCHe4OKzJQo_8YkW77_78"
+ADMIN_PASSWORD = "belousov"
+
+EXPIRE_TIME = 216000  # 2д 12ч
+
+db = sqlite3.connect("db.sqlite3", check_same_thread=False)
+cursor = db.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS codes(
+code TEXT PRIMARY KEY,
+link TEXT,
+expire INTEGER
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users(
+id INTEGER PRIMARY KEY
+)
+""")
+
+db.commit()
+
+
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Ввести код", callback_data="enter_code")],
+        [InlineKeyboardButton("⚙️ Админ панель", callback_data="admin")]
+    ])
+
+
+def admin_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Создать код", callback_data="create")],
+        [InlineKeyboardButton("🎲 Сгенерировать код", callback_data="generate")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton("🟢 Активные", callback_data="active")],
+        [InlineKeyboardButton("🔴 Истекшие", callback_data="expired")],
+        [InlineKeyboardButton("❌ Завершить код", callback_data="delete")],
+        [InlineKeyboardButton("⬅ Назад", callback_data="back")]
+    ])
+
+
+def gen_code():
+    return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.id
+
+    cursor.execute("INSERT OR IGNORE INTO users VALUES(?)", (user,))
+    db.commit()
+
+    await update.message.reply_text(
+        "Добро пожаловать\n\nВыберите действие:",
+        reply_markup=main_menu()
+    )
+
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    await q.answer()
+
+    if data == "enter_code":
+        context.user_data["enter_code"] = True
+        await q.message.reply_text("Введите спец.код")
+
+    elif data == "admin":
+        context.user_data["admin_login"] = True
+        await q.message.reply_text("Введите код админа")
+
+    elif data == "back":
+        await q.message.reply_text("Главное меню", reply_markup=main_menu())
+
+    elif data == "create":
+        context.user_data["create"] = True
+        await q.message.reply_text("Введите:\nкод ссылка")
+
+    elif data == "generate":
+
+        code = gen_code()
+        context.user_data["gen_code"] = code
+        await q.message.reply_text(f"Код: {code}\nТеперь отправьте ссылку")
+
+    elif data == "stats":
+
+        users = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        codes = cursor.execute("SELECT COUNT(*) FROM codes").fetchone()[0]
+
+        await q.message.reply_text(
+            f"👥 Пользователей: {users}\n🔑 Кодoв: {codes}"
+        )
+
+    elif data == "active":
+
+        now = int(time.time())
+
+        rows = cursor.execute(
+            "SELECT code,link FROM codes WHERE expire>?",
+            (now,)
+        ).fetchall()
+
+        if not rows:
+            await q.message.reply_text("Нет активных")
+            return
+
+        text = ""
+        for r in rows:
+            text += f"{r[0]} -> {r[1]}\n"
+
+        await q.message.reply_text(text)
+
+    elif data == "expired":
+
+        now = int(time.time())
+
+        rows = cursor.execute(
+            "SELECT code FROM codes WHERE expire<?",
+            (now,)
+        ).fetchall()
+
+        if not rows:
+            await q.message.reply_text("Нет истекших")
+            return
+
+        text = "\n".join([r[0] for r in rows])
+
+        await q.message.reply_text(text)
+
+    elif data == "delete":
+        context.user_data["delete"] = True
+        await q.message.reply_text("Введите код")
+
+
+async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    text = update.message.text
+    now = int(time.time())
+
+    if context.user_data.get("admin_login"):
+
+        if text == ADMIN_PASSWORD:
+            context.user_data["admin"] = True
+            context.user_data["admin_login"] = False
+
+            await update.message.reply_text(
+                "Админ панель",
+                reply_markup=admin_menu()
+            )
+        else:
+            await update.message.reply_text("Неверный пароль")
+
+        return
+
+    if context.user_data.get("admin"):
+
+        if context.user_data.get("create"):
+
+            try:
+                code, link = text.split()
+
+                expire = now + EXPIRE_TIME
+
+                cursor.execute(
+                    "INSERT INTO codes VALUES(?,?,?)",
+                    (code, link, expire)
+                )
+                db.commit()
+
+                await update.message.reply_text("Код создан")
+
+            except:
+                await update.message.reply_text("Ошибка")
+
+            context.user_data["create"] = False
+            return
+
+        if context.user_data.get("gen_code"):
+
+            code = context.user_data["gen_code"]
+            expire = now + EXPIRE_TIME
+
+            cursor.execute(
+                "INSERT INTO codes VALUES(?,?,?)",
+                (code, text, expire)
+            )
+
+            db.commit()
+
+            context.user_data["gen_code"] = None
+
+            await update.message.reply_text(f"Код создан: {code}")
+            return
+
+        if context.user_data.get("delete"):
+
+            cursor.execute("DELETE FROM codes WHERE code=?", (text,))
+            db.commit()
+
+            context.user_data["delete"] = False
+
+            await update.message.reply_text("Код удалён")
+            return
+
+    if context.user_data.get("enter_code"):
+
+        row = cursor.execute(
+            "SELECT link,expire FROM codes WHERE code=?",
+            (text,)
+        ).fetchone()
+
+        if not row:
+            await update.message.reply_text("❌ Такого кода нет")
+            return
+
+        link, expire = row
+
+        if expire < now:
+            await update.message.reply_text("⏳ Код истек")
+            return
+
+        await update.message.reply_text(f"Вот ссылка:\n{link}")
+
+        context.user_data["enter_code"] = False
+
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(buttons))
+app.add_handler(MessageHandler(filters.TEXT, messages))
+
+print("Бот запущен")
+
+app.run_polling()
